@@ -6,119 +6,142 @@ using System.Net.Sockets;
 using Unity.Netcode.Transports.UTP;
 using TMPro;
 
-public class MultiplayeHostAndClintLogin : MonoBehaviour
+public class MultiplayerHostAndClientLogin : MonoBehaviour
 {
-    [Header("maniPannel")]
-    public GameObject ButtonsPanel;
+    [Header("Main Panel")]
+    public GameObject mainPanel;
+
     [Header("Buttons")]
     public Button hostButton;
     public Button clientButton;
     public TextMeshProUGUI localIPText;
 
-    [Header("Clint Pannel")]
-    public GameObject ClintPannel;
-    public TMP_InputField ClintIPInputField;
-    public Button ClintEnterPlayGameButton;
-    public Button ClintExitGameButton;
+    [Header("Client Panel")]
+    public GameObject clientPanel;
+    public TMP_InputField clientIPInputField;
+    public Button clientEnterGameButton;
+    public Button clientExitButton;
 
-    static string targetIp;
+    [Header("Connection Settings")]
+    public bool autoConnectToLocalHost; // True = use local IP directly, False = show input field
+    private static string targetIp;
+
+    const ushort DefaultPort = 7777;
 
     void Start()
     {
+        ResetIpInputFieldVisual();
+
         hostButton?.onClick.AddListener(() =>
         {
+            if (NetworkManager.Singleton.IsListening) return;
+
             StartHost();
-            localIPText.text = "Local IP: " + GetLocalIPAddress();
-            ButtonsPanel.SetActive(false);
+            if (localIPText != null)
+                localIPText.text = "Local IP: " + GetLocalIPAddress();
+
+            mainPanel.SetActive(false);
         });
 
-        clientButton?.onClick.AddListener(getClintInput);
+        clientButton?.onClick.AddListener(() =>
+        {
+            if (autoConnectToLocalHost)
+            {
+                StartClientWithIp(GetLocalIPAddress());
+            }
+            else
+            {
+                ShowClientIpInput();
+            }
+        });
 
-        ClintEnterPlayGameButton?.onClick.AddListener(() =>
+        clientEnterGameButton?.onClick.AddListener(() =>
         {
             StartClient();
-            // Only hide the panels if StartClient actually succeeds.
-            // (We’ll hide inside StartClient once we know IP is valid.)
         });
 
-        ClintExitGameButton?.onClick.AddListener(() =>
+        clientExitButton?.onClick.AddListener(() =>
         {
-            ClintPannel.SetActive(false);
-            ButtonsPanel.SetActive(true);
+            clientPanel.SetActive(false);
+            mainPanel.SetActive(true);
             ResetIpInputFieldVisual();
         });
+
+        // Handle connection failures
+        NetworkManager.Singleton.OnClientDisconnectCallback += (clientId) =>
+        {
+            if (clientId == NetworkManager.Singleton.LocalClientId)
+            {
+                Debug.LogError("Client failed to connect or was disconnected.");
+                ShowConnectionError();
+                clientPanel.SetActive(true);
+                mainPanel.SetActive(false);
+            }
+        };
     }
 
-    #region Host 
+    #region Host
     public void StartHost()
     {
-        SetIpInGame(GetLocalIPAddress());
+        SetTransportIpAndPort(GetLocalIPAddress(), DefaultPort);
         NetworkManager.Singleton.StartHost();
-        Debug.Log("Host started");
+        Debug.Log("Host started on IP: " + GetLocalIPAddress());
     }
     #endregion
 
     #region Client
-    private void getClintInput()
+    private void ShowClientIpInput()
     {
-        ClintPannel.SetActive(true);
+        clientPanel.SetActive(true);
+        mainPanel.SetActive(false);
     }
 
     public void StartClient()
     {
-        // Read the text from the input field
-        targetIp = ClintIPInputField.text.Trim();
+        targetIp = clientIPInputField?.text.Trim();
 
-        // Validate before configuring transport/starting client
         if (!IsValidIp(targetIp))
         {
-            // Invalid: turn the field red and show a placeholder message
-            ClintIPInputField.text = "";
-            ClintIPInputField.placeholder.GetComponent<TextMeshProUGUI>().text = "Enter Correct IP";
-            ClintIPInputField.placeholder.GetComponent<TextMeshProUGUI>().color = Color.red;
-            var colors = ClintIPInputField.colors;
-            colors.normalColor = Color.white;
-            colors.highlightedColor = Color.white;
-            colors.selectedColor = Color.white;
-            colors.pressedColor = Color.white;
-            ClintIPInputField.colors = colors;
+            ShowInvalidIpError();
             return;
         }
 
-        // If valid, reset visual in case it was red before
-        ResetIpInputFieldVisual();
+        StartClientWithIp(targetIp);
+    }
 
-        try
+    private void StartClientWithIp(string ip)
+    {
+        if (NetworkManager.Singleton.IsListening)
         {
-            SetIpInGame(targetIp);
-            if (NetworkManager.Singleton.StartClient())
-            {
-                Debug.Log("Client started");
-                ClintPannel.SetActive(false);
-                ButtonsPanel.SetActive(false);
-            }
-            else
-            {
-                Debug.LogError("NetworkManager.StartClient() returned false.");
-                ShowConnectionError();
-            }
+            Debug.LogWarning("Already connected.");
+            return;
         }
-        catch (System.Exception e)
+
+        SetTransportIpAndPort(ip, DefaultPort);
+
+        if (NetworkManager.Singleton.StartClient())
         {
-            Debug.LogError("Failed to start client: " + e.Message);
+            Debug.Log("Client started with IP: " + ip);
+            clientPanel.SetActive(false);
+            mainPanel.SetActive(false);
+        }
+        else
+        {
+            Debug.LogError("Failed to start client.");
             ShowConnectionError();
         }
     }
     #endregion
 
-    void SetIpInGame(string ip)
+    #region Networking Helpers
+    void SetTransportIpAndPort(string ip, ushort port)
     {
         UnityTransport transport = NetworkManager.Singleton.GetComponent<UnityTransport>();
         if (transport != null)
         {
             transport.ConnectionData.Address = ip;
-            transport.ConnectionData.Port = 7777; // Default port, can be changed
-            Debug.Log("Transport configured with IP: " + ip);
+            transport.ConnectionData.Port = port;
+            Debug.Log($"Transport configured with IP: {ip}, Port: {port}");
         }
         else
         {
@@ -128,34 +151,27 @@ public class MultiplayeHostAndClintLogin : MonoBehaviour
 
     string GetLocalIPAddress()
     {
-        string localIP = "Not Available";
         foreach (var host in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
         {
             if (host.AddressFamily == AddressFamily.InterNetwork)
-            {
-                localIP = host.ToString();
-                break;
-            }
+                return host.ToString();
         }
-        return localIP;
+        return "Unavailable";
     }
 
-    // Helper: simple IP address validation (IPv4). 
-    // If you also want to allow hostnames, replace with Uri.CheckHostName(...) != Unknown.
     bool IsValidIp(string ipString)
     {
         return IPAddress.TryParse(ipString, out _);
     }
+    #endregion
 
-    // Reset input-field colors and placeholder to defaults
+    #region UI Helpers
     void ResetIpInputFieldVisual()
     {
-        // Reset placeholder text color & content
-        var placeholderText = ClintIPInputField.placeholder.GetComponent<TextMeshProUGUI>();
+        var placeholderText = clientIPInputField.placeholder.GetComponent<TextMeshProUGUI>();
         placeholderText.text = "Enter IP";
         placeholderText.color = Color.gray;
 
-        // Reset color block to Unity’s default values
         var colors = new ColorBlock
         {
             normalColor = Color.white,
@@ -166,20 +182,23 @@ public class MultiplayeHostAndClintLogin : MonoBehaviour
             colorMultiplier = 1f,
             fadeDuration = 0.1f
         };
-        ClintIPInputField.colors = colors;
+        clientIPInputField.colors = colors;
     }
 
-    // If StartClient fails, let the player know
+    void ShowInvalidIpError()
+    {
+        clientIPInputField.text = "";
+        var placeholder = clientIPInputField.placeholder.GetComponent<TextMeshProUGUI>();
+        placeholder.text = "Enter Correct IP";
+        placeholder.color = Color.red;
+    }
+
     void ShowConnectionError()
     {
-        ClintIPInputField.text = "";
-        ClintIPInputField.placeholder.GetComponent<TextMeshProUGUI>().text = "Connection failed";
-        ClintIPInputField.placeholder.GetComponent<TextMeshProUGUI>().color = Color.red;
-        var colors = ClintIPInputField.colors;
-        colors.normalColor = Color.white;
-        colors.highlightedColor = Color.white;
-        colors.selectedColor = Color.white;
-        colors.pressedColor = Color.white;
-        ClintIPInputField.colors = colors;
+        clientIPInputField.text = "";
+        var placeholder = clientIPInputField.placeholder.GetComponent<TextMeshProUGUI>();
+        placeholder.text = "Connection failed";
+        placeholder.color = Color.red;
     }
+    #endregion
 }
